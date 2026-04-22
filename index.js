@@ -32,43 +32,45 @@ const HEADERS = {
 
 // ─── Scraper Mercado Livre ────────────────────────────────────────────────────
 async function scrapeMercadoLivre(url) {
-  const { data } = await axios.get(url, { headers: HEADERS, timeout: 10000 });
+  const { data } = await axios.get(url, { headers: HEADERS, timeout: 12000 });
   const $ = cheerio.load(data);
 
-  // Titulo
+  // Titulo - multiplos seletores
   const title =
     $("h1.ui-pdp-title").text().trim() ||
-    $("h1.item-title").text().trim() ||
+    $("h1.item-title__primary").text().trim() ||
+    $(".ui-pdp-title").text().trim() ||
     $("h1").first().text().trim();
 
-  // Vendedor
+  // Vendedor - multiplos seletores
   const seller =
+    $(".ui-pdp-seller__link-trigger-button span").text().trim() ||
     $(".ui-pdp-seller__link-trigger").text().trim() ||
+    $("[data-testid='seller-name']").text().trim() ||
+    $(".seller-info__name").text().trim() ||
     $("[class*='seller'] a").first().text().trim() ||
-    $(".ui-pdp-action-modal__trigger").first().text().trim() ||
     "";
 
-  // Preco - varios seletores pois o ML muda layout frequentemente
-  let priceText =
-    $(".andes-money-amount__fraction").first().text().trim() ||
-    $(".price-tag-fraction").first().text().trim() ||
-    $("[class*='price-tag-fraction']").first().text().trim();
-
-  // Centavos (opcional)
-  const cents = $(".andes-money-amount__cents").first().text().trim();
-
-  // Montar preco
+  // Preco - extrair do JSON embutido primeiro (mais confiavel)
   let price = null;
-  if (priceText) {
-    const clean = priceText.replace(/\./g, "").replace(",", ".");
-    const centVal = cents ? parseInt(cents) / 100 : 0;
-    price = parseFloat(clean) + centVal;
+
+  // Metodo 1: JSON na pagina
+  const jsonMatch = data.match(/"price":(\d+(?:\.\d+)?)/);
+  if (jsonMatch) price = parseFloat(jsonMatch[1]);
+
+  // Metodo 2: seletores CSS
+  if (!price) {
+    const fracText = $(".andes-money-amount__fraction").first().text().replace(/\./g, "").trim();
+    const centsText = $(".andes-money-amount__cents").first().text().trim();
+    if (fracText) {
+      price = parseFloat(fracText) + (centsText ? parseInt(centsText) / 100 : 0);
+    }
   }
 
-  // Tentar extrair do JSON embutido na pagina se os seletores falharem
+  // Metodo 3: meta tag
   if (!price) {
-    const match = data.match(/"price":(\d+\.?\d*)/);
-    if (match) price = parseFloat(match[1]);
+    const metaPrice = $("meta[itemprop='price']").attr("content");
+    if (metaPrice) price = parseFloat(metaPrice);
   }
 
   return { title, price, seller, platform: "ml" };
@@ -262,4 +264,55 @@ app.get("/", (req, res) => {
 // ─── Iniciar servidor ─────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`Scraper rodando na porta ${PORT}`);
+});
+
+// ─── Rota de análise com IA ───────────────────────────────────────────────────
+app.post("/analyze", async (req, res) => {
+  const { produto, meuPreco, concorrentes } = req.body;
+  if (!produto) return res.status(400).json({ error: "Dados incompletos" });
+
+  const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+  if (!ANTHROPIC_KEY) {
+    return res.status(500).json({ error: "Chave da API nao configurada no servidor" });
+  }
+
+  try {
+    const prompt = `Produto: "${produto}"
+Meu preco: R$ ${Number(meuPreco).toFixed(2)}
+
+Concorrentes:
+${(concorrentes || []).map(c =>
+  `• ${c.plataforma}${c.loja ? " (Loja: " + c.loja + ")" : ""}: R$ ${Number(c.precoAtual).toFixed(2)} | min 30d: R$ ${Number(c.min30d).toFixed(2)} | max 30d: R$ ${Number(c.max30d).toFixed(2)} | tendencia: ${c.tendencia}`
+).join("\n")}
+
+Analise em 3 pontos diretos:
+1) Posicao competitiva atual
+2) Acao recomendada imediata
+3) Preco sugerido e justificativa`;
+
+    const response = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 700,
+        system: "Voce e um especialista em precificacao para marketplaces brasileiros. Respostas diretas em portugues com bullet points curtos.",
+        messages: [{ role: "user", content: prompt }],
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": ANTHROPIC_KEY,
+          "anthropic-version": "2023-06-01",
+        },
+      }
+    );
+
+    const analysis = response.data?.content?.[0]?.text || "Nao foi possivel gerar analise.";
+    console.log("Analise gerada para:", produto);
+    return res.json({ success: true, analysis });
+
+  } catch (err) {
+    console.error("Erro na analise:", err.message);
+    return res.status(500).json({ error: "Erro ao gerar analise: " + err.message });
+  }
 });
