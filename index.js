@@ -41,6 +41,13 @@ async function scrapeMercadoLivre(url) {
     $("h1.item-title").text().trim() ||
     $("h1").first().text().trim();
 
+  // Vendedor
+  const seller =
+    $(".ui-pdp-seller__link-trigger").text().trim() ||
+    $("[class*='seller'] a").first().text().trim() ||
+    $(".ui-pdp-action-modal__trigger").first().text().trim() ||
+    "";
+
   // Preco - varios seletores pois o ML muda layout frequentemente
   let priceText =
     $(".andes-money-amount__fraction").first().text().trim() ||
@@ -64,7 +71,7 @@ async function scrapeMercadoLivre(url) {
     if (match) price = parseFloat(match[1]);
   }
 
-  return { title, price, platform: "ml" };
+  return { title, price, seller, platform: "ml" };
 }
 
 // ─── Scraper Amazon ───────────────────────────────────────────────────────────
@@ -228,6 +235,7 @@ app.post("/scrape", async (req, res) => {
       success: true,
       title:    result.title   || "Titulo nao encontrado",
       price:    result.price   || null,
+      seller:   result.seller  || null,
       platform: result.platform,
       url,
     });
