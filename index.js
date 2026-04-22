@@ -32,15 +32,22 @@ const HEADERS = {
 
 // ─── Scraper Mercado Livre ────────────────────────────────────────────────────
 async function scrapeMercadoLivre(url) {
+  // Fallback: extrair titulo do slug da URL
+  const slugMatch = url.match(/mercadolivre\.com\.br\/([^/?#]+)/);
+  const titleFromSlug = slugMatch
+    ? decodeURIComponent(slugMatch[1]).replace(/[-_]/g, " ").replace(/\b\w/g, l => l.toUpperCase()).trim()
+    : "";
+
   const { data } = await axios.get(url, { headers: HEADERS, timeout: 12000 });
   const $ = cheerio.load(data);
 
-  // Titulo - multiplos seletores
+  // Titulo - multiplos seletores para /MLB e /p/
   const title =
     $("h1.ui-pdp-title").text().trim() ||
     $("h1.item-title__primary").text().trim() ||
     $(".ui-pdp-title").text().trim() ||
-    $("h1").first().text().trim();
+    $("h1").first().text().trim() ||
+    titleFromSlug;
 
   // Vendedor - multiplos seletores
   const seller =
@@ -51,25 +58,42 @@ async function scrapeMercadoLivre(url) {
     $("[class*='seller'] a").first().text().trim() ||
     "";
 
-  // Preco - extrair do JSON embutido primeiro (mais confiavel)
   let price = null;
 
-  // Metodo 1: JSON na pagina
-  const jsonMatch = data.match(/"price":(\d+(?:\.\d+)?)/);
-  if (jsonMatch) price = parseFloat(jsonMatch[1]);
+  // Metodo 1: JSON-LD schema (funciona em paginas /p/)
+  $("script[type='application/ld+json']").each((i, el) => {
+    if (price) return;
+    try {
+      const json = JSON.parse($(el).html());
+      const arr = Array.isArray(json) ? json : [json];
+      for (const item of arr) {
+        const offers = item?.offers;
+        if (offers) {
+          const p = offers.price || offers.lowPrice || (Array.isArray(offers) && offers[0]?.price);
+          if (p) { price = parseFloat(p); return; }
+        }
+      }
+    } catch {}
+  });
 
-  // Metodo 2: seletores CSS
+  // Metodo 2: JSON embutido na pagina
   if (!price) {
-    const fracText = $(".andes-money-amount__fraction").first().text().replace(/\./g, "").trim();
-    const centsText = $(".andes-money-amount__cents").first().text().trim();
-    if (fracText) {
-      price = parseFloat(fracText) + (centsText ? parseInt(centsText) / 100 : 0);
+    for (const pat of [/"price":(\d+(?:\.\d+)?)/, /"amount":(\d+(?:\.\d+)?)/, /"selling_price":(\d+(?:\.\d+)?)/]) {
+      const m = data.match(pat);
+      if (m && parseFloat(m[1]) > 1) { price = parseFloat(m[1]); break; }
     }
   }
 
-  // Metodo 3: meta tag
+  // Metodo 3: seletores CSS
   if (!price) {
-    const metaPrice = $("meta[itemprop='price']").attr("content");
+    const fracText = $(".andes-money-amount__fraction").first().text().replace(/\./g, "").trim();
+    const centsText = $(".andes-money-amount__cents").first().text().trim();
+    if (fracText) price = parseFloat(fracText) + (centsText ? parseInt(centsText) / 100 : 0);
+  }
+
+  // Metodo 4: meta tag
+  if (!price) {
+    const metaPrice = $("meta[itemprop='price']").attr("content") || $("meta[property='product:price:amount']").attr("content");
     if (metaPrice) price = parseFloat(metaPrice);
   }
 
