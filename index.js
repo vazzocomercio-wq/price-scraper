@@ -145,40 +145,72 @@ async function scrapeMagalu(url) {
 }
 
 // ─── Scraper Shopee ───────────────────────────────────────────────────────────
-// Shopee requer JavaScript para renderizar — usamos a API interna deles
 async function scrapeShopee(url) {
-  // Extrair itemId e shopId da URL
-  // Formato: shopee.com.br/nome-produto-i.SHOPID.ITEMID
+  // Extrair nome do produto do slug da URL como fallback
+  // Formato: shopee.com.br/Nome-Do-Produto-i.SHOPID.ITEMID
+  const slugMatch = url.match(/shopee\.com\.br\/([^?]+)-i\.\d+\.\d+/);
+  const titleFromSlug = slugMatch
+    ? decodeURIComponent(slugMatch[1])
+        .replace(/-/g, " ")
+        .replace(/\b\w/g, l => l.toUpperCase())
+        .trim()
+    : "";
+
+  // Extrair IDs
   const match = url.match(/i\.(\d+)\.(\d+)/);
 
   if (match) {
     const shopId = match[1];
     const itemId = match[2];
-    const apiUrl = `https://shopee.com.br/api/v4/item/get?itemid=${itemId}&shopid=${shopId}`;
 
-    const { data } = await axios.get(apiUrl, {
-      headers: {
-        ...HEADERS,
-        "Referer": "https://shopee.com.br/",
-        "x-api-source": "pc",
-      },
-      timeout: 10000,
-    });
+    // Tentar API interna da Shopee com headers completos
+    try {
+      const apiUrl = `https://shopee.com.br/api/v4/item/get?itemid=${itemId}&shopid=${shopId}`;
+      const { data } = await axios.get(apiUrl, {
+        headers: {
+          ...HEADERS,
+          "Referer": `https://shopee.com.br/`,
+          "x-api-source": "pc",
+          "x-shopee-language": "pt-BR",
+          "Cookie": "SPC_EC=-",
+        },
+        timeout: 12000,
+      });
 
-    const item = data?.data?.item;
-    if (item) {
-      const title = item.name;
-      const price = item.price_min / 100000; // Shopee usa centavos * 1000
-      return { title, price, platform: "shopee" };
+      const item = data?.data?.item;
+      if (item) {
+        const title = item.name || titleFromSlug;
+        const price = item.price_min / 100000;
+        const seller = item.shop_name || "";
+        return { title, price, seller, platform: "shopee" };
+      }
+    } catch (apiErr) {
+      console.log("Shopee API falhou, tentando HTML:", apiErr.message);
     }
+
+    // Fallback: tentar scraping do HTML
+    try {
+      const { data: html } = await axios.get(url.split("?")[0], { headers: HEADERS, timeout: 12000 });
+      const $ = cheerio.load(html);
+      const htmlTitle = $("h1").first().text().trim();
+      const priceMatch = html.match(/"price":(\d+)/);
+      const price = priceMatch ? parseInt(priceMatch[1]) / 100000 : null;
+      return { title: htmlTitle || titleFromSlug, price, seller: "", platform: "shopee" };
+    } catch {}
   }
 
-  // Fallback: tentar scraping direto
-  const { data: html } = await axios.get(url, { headers: HEADERS, timeout: 10000 });
-  const $ = cheerio.load(html);
-  const title = $("h1").first().text().trim();
+  // Ultimo fallback: retornar nome extraido do URL
+  if (titleFromSlug) {
+    return {
+      title: titleFromSlug,
+      price: null,
+      seller: "",
+      platform: "shopee",
+      warning: "Preco nao encontrado automaticamente. Insira manualmente."
+    };
+  }
 
-  return { title, price: null, platform: "shopee" };
+  return { title: "", price: null, seller: "", platform: "shopee" };
 }
 
 // ─── Scraper Americanas ───────────────────────────────────────────────────────
@@ -231,13 +263,17 @@ app.post("/scrape", async (req, res) => {
       });
     }
 
-    console.log(`OK - Titulo: ${result.title?.substring(0, 50)} | Preco: R$ ${result.price}`);
+    // Retornar sucesso mesmo com dados parciais (ex: titulo sem preco)
+    const partial = !result.price || !result.title;
+    console.log(`${partial ? "PARCIAL" : "OK"} - Titulo: ${result.title?.substring(0, 50)} | Preco: R$ ${result.price}`);
 
     return res.json({
       success: true,
-      title:    result.title   || "Titulo nao encontrado",
+      partial,
+      title:    result.title   || "",
       price:    result.price   || null,
       seller:   result.seller  || null,
+      warning:  result.warning || (partial ? "Alguns dados nao foram encontrados automaticamente. Preencha o restante manualmente." : null),
       platform: result.platform,
       url,
     });
